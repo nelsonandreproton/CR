@@ -2,8 +2,23 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse
 import uuid
 import html
+import httpx
+import os
+import logging
+from dotenv import load_dotenv
+import asyncio
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # In-memory storage for todos
 todos = []
@@ -13,6 +28,39 @@ class Todo:
         self.id = id
         self.text = text
         self.completed = completed
+
+async def send_telegram_notification(message: str):
+    """Send notification to Telegram bot asynchronously"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.info("Telegram configuration missing - skipping notification")
+        return False
+
+    # Validate message length (Telegram limit is 4096 characters)
+    if len(message) > 4096:
+        message = message[:4090] + "..."
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            logger.info("Telegram notification sent successfully")
+            return True
+    except httpx.TimeoutException:
+        logger.warning("Telegram notification timed out")
+        return False
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Telegram API error: {e.response.status_code}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification: {type(e).__name__}")
+        return False
 
 def generate_html():
     todo_items = ""
@@ -68,7 +116,7 @@ def generate_html():
             }}
             button {{
                 padding: 10px 20px;
-                background: #007bff;
+                background: #dc3545;
                 color: white;
                 border: none;
                 border-radius: 4px;
@@ -76,7 +124,7 @@ def generate_html():
                 font-size: 16px;
             }}
             button:hover {{
-                background: #0056b3;
+                background: #c82333;
             }}
             .todo-list {{
                 border: 1px solid #ddd;
@@ -168,6 +216,11 @@ async def add_todo(text: str = Form(...)):
 
     new_todo = Todo(id=str(uuid.uuid4()), text=text.strip())
     todos.append(new_todo)
+
+    # Send Telegram notification asynchronously (don't block the response)
+    telegram_message = f"📝 <b>New Todo Created!</b>\n\n{html.escape(new_todo.text)}\n\n<i>Todo ID: {new_todo.id[:8]}...</i>"
+    asyncio.create_task(send_telegram_notification(telegram_message))
+
     return {"status": "success"}
 
 @app.post("/toggle/{todo_id}")
